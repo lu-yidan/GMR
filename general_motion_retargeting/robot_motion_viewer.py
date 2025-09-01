@@ -52,7 +52,8 @@ class RobotMotionViewer:
                 record_video=False,
                 video_path=None,
                 video_width=640,
-                video_height=480):
+                video_height=480,
+                video_fps=None):
         
         self.robot_type = robot_type
         self.xml_path = ROBOT_XML_DICT[robot_type]
@@ -83,8 +84,10 @@ class RobotMotionViewer:
             
             if not os.path.exists(video_dir):
                 os.makedirs(video_dir)
+            
+            # Use motion_fps for video recording to maintain correct timing
             self.mp4_writer = imageio.get_writer(self.video_path, fps=self.motion_fps)
-            print(f"Recording video to {self.video_path}")
+            print(f"Recording video to {self.video_path} at {self.motion_fps} FPS, {video_width}x{video_height}")
             
             # Initialize renderer for video recording
             self.renderer = mj.Renderer(self.model, height=video_height, width=video_width)
