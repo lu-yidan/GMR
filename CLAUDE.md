@@ -4,111 +4,135 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Installation and Setup
 
-This is a Python package for motion retargeting to humanoid robots. Install in development mode:
-
 ```bash
 conda create -n gmr python=3.10 -y
 conda activate gmr
 pip install -e .
-conda install -c conda-forge libstdcxx-ng -y
+conda install -c conda-forge libstdcxx-ng -y  # fixes rendering issues
+```
+
+After installing, change `ext` in `smplx/body_models.py` from `npz` to `pkl` if using SMPL-X pkl files.
+
+SMPL-X body models must be placed at:
+```
+assets/body_models/smplx/SMPLX_NEUTRAL.pkl
+assets/body_models/smplx/SMPLX_FEMALE.pkl
+assets/body_models/smplx/SMPLX_MALE.pkl
+```
+
+## Common Commands
+
+```bash
+# SMPL-X to robot (single)
+python scripts/smplx_to_robot.py --smplx_file <path> --robot <robot_name> --save_path <output.pkl> --rate_limit
+
+# BVH to robot (single) - --format options: lafan1, nokov
+python scripts/bvh_to_robot.py --bvh_file <path> --robot <robot_name> --save_path <output.pkl> --rate_limit --format <format>
+
+# Xsens BVH to robot (requires running mujoco_xsens_bvh_view.py first to generate offset.json)
+python scripts/xsens_bvh_to_robot.py --bvh_file <path> --robot <robot_name> --save_path <output.pkl> --scale 0.01 --reset_to_zero --bvh_format 3DSM
+
+# FBX offline to robot
+python scripts/fbx_offline_to_robot.py --motion_file <path> --robot <robot_name> --save_path <output.pkl>
+
+# GVHMR (monocular video) to robot
+python scripts/gvhmr_to_robot.py --gvhmr_pred_file <path/hmr4d_results.pt> --robot <robot_name>
+
+# OptiTrack real-time streaming
+python scripts/optitrack_to_robot.py --server_ip <ip> --client_ip <ip> --robot unitree_g1
+
+# Batch processing
+python scripts/smplx_to_robot_dataset.py --src_folder <dir> --tgt_folder <dir> --robot <robot_name>
+python scripts/bvh_to_robot_dataset.py --src_folder <dir> --tgt_folder <dir> --robot <robot_name>
+
+# Visualize saved robot motion
+python scripts/vis_robot_motion.py --robot <robot_name> --robot_motion_path <path.pkl>
+python scripts/vis_robot_motion_dataset.py --robot <robot_name> --robot_motion_folder <dir>
+# Add --record_video --video_path <output.mp4> to record
+
+# Visualize Xsens BVH in MuJoCo (also generates offset.json for retargeting)
+python general_motion_retargeting/utils/xsens_vendor/mujoco_xsens_bvh_view.py --bvh_file <path> --scale 0.01 --reset_to_zero
 ```
 
 ## Code Architecture
 
 ### Core Components
 
-- **`GeneralMotionRetargeting`** (`general_motion_retargeting/motion_retarget.py`): Main class for motion retargeting using inverse kinematics (IK) solver built on mink/mujoco
-- **`KinematicsModel`** (`general_motion_retargeting/kinematics_model.py`): Handles robot kinematics calculations
-- **`RobotMotionViewer`** (`general_motion_retargeting/robot_motion_viewer.py`): MuJoCo-based visualization for robot motions
-- **Configuration System** (`general_motion_retargeting/params.py`): Simplified robot definitions and IK config mappings - cleaned to focus on core supported robots
+- **`GeneralMotionRetargeting`** (`general_motion_retargeting/motion_retarget.py`): Main retargeting class. Instantiated with `src_human` (data format key) and `tgt_robot` (robot key). Loads the MuJoCo XML model and IK config, sets up mink `FrameTask` objects, then solves IK frame-by-frame.
+- **`KinematicsModel`** (`general_motion_retargeting/kinematics_model.py`): Robot kinematics utilities.
+- **`RobotMotionViewer`** (`general_motion_retargeting/robot_motion_viewer.py`): MuJoCo-based viewer with optional video recording.
+- **`params.py`** (`general_motion_retargeting/params.py`): Central registry — `ROBOT_XML_DICT` maps robot names to MuJoCo XML paths, `IK_CONFIG_DICT` maps `(src_format, robot_name)` to JSON config paths, `ROBOT_BASE_DICT` maps robot names to their root body name.
 
 ### Data Flow
 
-1. **Human Motion Input**: SMPL-X (AMASS/OMOMO) or BVH (LAFAN1) format
-2. **Motion Format**: Each frame = dict of (human_body_name, 3D translation + rotation)
-3. **Robot Output**: Tuple of (base_translation, base_rotation, joint_positions)
-4. **IK Configs**: JSON files in `general_motion_retargeting/ik_configs/` define human-to-robot body mappings
+1. **Input**: Human motion loaded as a list of per-frame dicts: `{body_name: (3D_translation, quaternion_wxyz)}`
+2. **Scaling**: Human joint positions scaled by `human_scale_table` (per-body scale factors), optionally adjusted by `actual_human_height / human_height_assumption` ratio
+3. **IK**: Two-phase mink IK solve (`ik_match_table1` then `ik_match_table2`) — each table entry maps a robot body to a human body with position/rotation weights and offsets
+4. **Output**: Pickle file with keys: `fps`, `root_pos`, `root_rot` (xyzw), `dof_pos`, `local_body_pos`, `link_body_list`
 
-### Supported Robots
+### IK Config JSON Structure
 
-Core robot models in `assets/` directory:
-- Unitree G1 (`unitree_g1`) - 29 DOF humanoid
-- Booster T1 (`booster_t1`) - Full-body humanoid 
-- Booster K1 (`booster_k1`) - 22 DOF humanoid
-- Stanford ToddlerBot (`stanford_toddy`) - Research humanoid
-- Fourier N1 (`fourier_n1`) - Commercial humanoid
-- ENGINEAI PM01 (`engineai_pm01`) - Industrial humanoid
-- Kuavo S45 (`kuavo_s45`) - 28 DOF humanoid
-- HighTorque Hi (`hightorque_hi`) - 25 DOF humanoid
-- Galaxea R1 Pro (`galaxea_r1pro`) - 24 DOF wheeled humanoid
+Each `ik_configs/*.json` file defines the human-to-robot mapping:
 
-Additional models retained in ROBOT_BASE_DICT for compatibility:
-- `unitree_g1_with_hands` (43 DOF with dexterous hands)
-- `dex31_left_hand`, `dex31_right_hand` (hand components)
-
-## Common Commands
-
-### Single Motion Retargeting
-```bash
-# SMPL-X to robot
-python scripts/smplx_to_robot.py --smplx_file <path> --robot <robot_name> --save_path <output.pkl>
-
-# BVH to robot  
-python scripts/bvh_to_robot.py --bvh_file <path> --robot <robot_name> --save_path <output.pkl>
+```json
+{
+  "robot_root_name": "pelvis",       // robot base body name (must match ROBOT_BASE_DICT)
+  "human_root_name": "pelvis",       // source skeleton root joint name
+  "ground_height": 0.0,
+  "human_height_assumption": 1.8,    // assumed human height in meters for scaling
+  "use_ik_match_table1": true,
+  "use_ik_match_table2": true,
+  "human_scale_table": {
+    "pelvis": 0.9,                   // scale factor per human body part
+    ...
+  },
+  "ik_match_table1": {
+    "robot_body_name": [
+      "human_body_name",
+      100,                           // position tracking weight
+      10,                            // rotation tracking weight
+      [0.0, 0.0, 0.0],              // position offset (xyz)
+      [0.5, -0.5, -0.5, -0.5]      // rotation offset (quaternion wxyz)
+    ],
+    ...
+  },
+  "ik_match_table2": { ... }        // second IK pass, same format
+}
 ```
 
-### Batch Processing
-```bash
-# Process datasets
-python scripts/smplx_to_robot_dataset.py
-python scripts/bvh_to_robot_dataset.py
-```
+### Supported Robots (from `params.py`)
 
-### Visualization
-```bash
-# Visualize saved robot motion
-python scripts/vis_robot_motion.py --robot <robot_name> --robot_motion_path <path.pkl>
-```
+| Robot name | DOF |
+|---|---|
+| `unitree_g1` | 29 |
+| `unitree_g1_with_hands` | 43 |
+| `unitree_h1` | 19 |
+| `unitree_h1_2` | 27 |
+| `booster_t1` | — |
+| `booster_t1_29dof` | 29 |
+| `booster_k1` | 22 |
+| `stanford_toddy` | — |
+| `fourier_n1` | — |
+| `fourier_gr3` | 31 |
+| `engineai_pm01` | — |
+| `kuavo_s45` | 28 |
+| `hightorque_hi` | 25 |
+| `galaxea_r1pro` | 24 (wheeled) |
+| `berkeley_humanoid_lite` | 22 |
+| `pnd_adam_lite` | 25 |
+| `tienkung` | 20 |
+| `pal_talos` | 30 |
 
-Add `--record_video --video_path <output.mp4>` to any visualization command to record video.
+### Adding a New Robot
 
-## Key Technical Details
+1. Add MuJoCo XML to `assets/<robot_name>/`
+2. Register in `params.py`: `ROBOT_XML_DICT`, `ROBOT_BASE_DICT`, `IK_CONFIG_DICT` (for each supported source format), `VIEWER_CAM_DISTANCE_DICT`
+3. Create IK config JSON in `general_motion_retargeting/ik_configs/`
 
-- **IK Solver**: Uses mink library with configurable solver (default: "daqp") and damping (default: 5e-1)
-- **Human Height Scaling**: Automatic scaling based on `actual_human_height` parameter vs config assumptions
-- **Real-time Performance**: Optimized for 60-70 FPS on high-end CPUs for teleoperation use cases
-- **Body Model Dependencies**: Requires SMPL-X body models in `assets/body_models/smplx/`
+### Key Technical Details
 
-## File Organization
-
-- `scripts/`: Entry point scripts for different retargeting workflows
-- `general_motion_retargeting/`: Core library code
-- `assets/`: Robot models (MuJoCo XML) and body models (SMPL-X)
-- `general_motion_retargeting/ik_configs/`: JSON configuration files for human-to-robot body mappings:
-  - SMPL-X configs: `smplx_to_{g1,t1,k1,toddy,n1,pm01,kuavo,hi,r1pro}.json`
-  - BVH configs: `bvh_to_{g1,t1,toddy,n1,pm01}.json`
-  - FBX configs: `fbx_to_g1.json`
-
-## Project Status & Features
-
-**Current State**: Production-ready motion retargeting system with extensive robot support
-
-**Key Capabilities**:
-- **Multi-format Input**: SMPL-X (AMASS/OMOMO), BVH (LAFAN1), FBX (OptiTrack)
-- **Real-time Performance**: 60-70 FPS on high-end hardware for teleoperation
-- **9 Robot Models**: From research platforms to commercial humanoids
-- **Robust IK**: Mink-based solver with automatic human height scaling
-- **Visualization**: MuJoCo-based viewer with video recording capabilities
-- **Batch Processing**: Dataset-level retargeting workflows
-
-**Use Cases**:
-- Real-time whole-body teleoperation (see [TWIST](https://github.com/YanjieZe/TWIST))
-- RL policy training data generation
-- Motion capture to robot deployment
-- Cross-platform humanoid motion transfer
-
-**Recent Additions** (2025):
-- Booster K1 support (9th robot)
-- Dexterous hand integration (G1 + Dex31)
-- Wheeled humanoid support (Galaxea R1 Pro)
-- Enhanced OptiTrack real-time streaming
+- **IK solver**: mink with default solver `"daqp"`, damping `5e-1`, max 10 iterations per frame
+- **Quaternion convention**: `wxyz` throughout (MuJoCo convention); output pickle stores `root_rot` as `xyzw`
+- **Velocity limits**: `use_velocity_limit=True` caps joint velocity at `3*pi` rad/s per motor
+- **`GeneralMotionRetargeting` attributes**: `robot_dof_names`, `robot_body_names`, `robot_motor_names` dicts are populated on init for downstream use
+- **Third-party**: `third_party/poselib/` provides FBX import and rotation utilities; `general_motion_retargeting/optitrack_vendor/` provides NatNet client for real-time OptiTrack streaming
