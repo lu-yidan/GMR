@@ -609,3 +609,108 @@ The original robot models can be found at the following locations:
 * [PAL Robotics' Talos](https://github.com/google-deepmind/mujoco_menagerie): [Link to file](https://github.com/google-deepmind/mujoco_menagerie/tree/main/pal_talos)
 * [Toddlerbot](https://github.com/hshi74/toddlerbot): [Link to file](https://github.com/hshi74/toddlerbot/tree/main/toddlerbot/descriptions/toddlerbot_active)
 * [Unitree G1](https://github.com/unitreerobotics/unitree_ros): [Link to file](https://github.com/unitreerobotics/unitree_ros/tree/master/robots/g1_description)
+
+## Local DuoBox two-G1 playback
+
+`lyd/duobox-g1-playback` adds a read-only DuoBox adapter and a two-robot video renderer.
+It uses the existing `fbx_offline` GMR IK mapping with the bundled G1 29-DoF model.
+The input is the authorized DuoBox `fbx_export_joints/*.npy` data; SMPL-X assets are not required.
+Root rotation is global and other joint rotations are parent-local; the adapter accumulates
+rotations along the 21-joint hierarchy. Original Z-up coordinates are retained.
+Both actors share the original time axis, mapping scales, world origin and a constant floor offset.
+GMR scales root trajectories by 0.9 and arm offsets by 0.8; pair distances are therefore scaled,
+not preserved in original metres. No dynamics, balance, or pair collision constraints are solved.
+
+Minimal environment for this adapter (does not install unrelated SMPL-X/streaming dependencies):
+
+```bash
+uv venv --python 3.11 .venv
+uv pip install --python .venv/bin/python mujoco mink daqp scipy rich loop-rate-limiters imageio imageio-ffmpeg
+uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/python scripts/duobox_to_g1_pair.py \
+  --input /home/d080/workspace/ready_to_react/data/DuoBox/fbx_export_joints/004_ma_jab_liu_shanbi_joints.npy \
+  --output motion_data/duobox_004_pair
+```
+
+Outputs: `pair_motion.npz` (`qpos`: frames x 2 actors x 36; root quaternion wxyz;
+29 joint angles), `metadata.json`, `g1_pair.mp4`, and an HTML video player.
+An existing trajectory is never overwritten; use a new output directory to rerun.
+
+```bash
+.venv/bin/python -m http.server 19092 --bind 127.0.0.1 --directory motion_data/duobox_004_pair
+```
+
+Open http://127.0.0.1:19092/ for synchronized playback. Artifacts and source data are not committed.
+
+### Interactive G1 browser and continuity comparison
+
+```bash
+# First run only: download pinned Three.js 0.180.0 from npm, verify SHA-512.
+.venv/bin/python scripts/setup_duobox_web.py
+.venv/bin/python scripts/duobox_g1_browser.py --port 19093
+```
+
+Open http://127.0.0.1:19093/. Select any of the 117 source clips, choose baseline
+or continuity-constrained IK, and click generate if it is not cached. One local
+worker serializes generation. The browser supports orbit/pan/zoom, frame stepping,
+speed selection, timeline scrubbing and NPZ download. No external CDN is used during
+playback. Startup expects the adjacent `ready_to_react/data/DuoBox` directory.
+Existing baseline clip 004 and continuity clip 004 use their original output folders.
+
+`--continuous --no-video` on `duobox_to_g1_pair.py` adds a previous-frame posture
+cost (0.2) and a **whole output-frame** joint displacement constraint of 8/30 rad.
+The bound is anchored to the previous output, not reset at every internal IK solve.
+It is applied in both GMR IK stages, with `limits=` explicitly passed to current
+Mink. This avoids the legacy positional-argument ambiguity with `safety_break`.
+Floating-base motion and acceleration remain unconstrained. The 8 rad/s cap is a
+preview parameter, not a validated hardware rating. Ground/contact/dynamics and
+inter-robot collision constraints are not added by this mode. It can trade target
+accuracy for continuity; do not treat it as a final training reference without QA.
+
+Executed on clip 004: peak single-frame joint change 71.58 -> 15.28 degrees;
+scaled wrist-target position RMSE 10.40 -> 10.50 cm. The latter is geometric target
+error, not tracker performance. Continuous clip 001 also generated successfully
+from the browser. `scripts/test_duobox_continuity.py` checks that internal iterations
+share the same frame budget. Metrics are saved under `motion_data/`.
+
+### DuoBox geometry repair
+
+The browser now defaults to **自碰撞与支撑脚修正版**. Generate this mode with
+`scripts/duobox_to_g1_pair.py --input <source.npy> --output <new-directory> --geometry --no-video`.
+This includes continuity constraints plus forearm/wrist/hand versus own torso/pelvis mesh
+clearance constraints, with actual-distance backtracking after IK integration. It assumes
+the source ground is Z=0 instead of using the minimum toe height across a recording.
+Foot targets are flattened when source ankle height is below 0.12 m and planar speed
+below 1 m/s, or the source toe is below -0.015 m. This heuristic can suppress legitimate
+toe pivots; it is not measured contact or dynamic balance. No inter-robot collision
+constraint is included. Original and continuity-only outputs remain available.
+
+Browser geometry caches use `motion_data/duobox_web/motions/NNN_geometry_v7/`.
+Use the frame-number field to inspect a specific frame. The local validation report
+`motion_data/duobox_geometry_validation.json` compares motion 000's right-foot tilt.
+
+Geometry v4 includes all descendants of both elbows, including the separate rubber-hand bodies (palms/fingers), against torso/pelvis/head meshes. The previous v3 omitted those fixed child bodies; its clearance metric did not cover the hands.
+
+Geometry v5 bounds both complete hand poses in world coordinates relative to the previous output frame (3 cm translation and 10 degrees rotation per 30 Hz frame), including all internal IK iterations. Collision-safe backtracking checks these bounds together with clearance. This limits sudden releases from collision constraints but can introduce tracking lag; it does not bound acceleration or guarantee a dynamically feasible trajectory.
+
+Geometry v7 replaces the fixed v5 hand budget with source-motion-dependent displacement and rotation budgets: translation is 0.02 m + 1.5 times source hand displacement; angle is 8 degrees + 1.5 times the smaller of source rotation and atan2(source displacement, 0.3 m). The latter prevents near-stationary source wrist rotations from granting large flips. This is an offline retarget heuristic, not robot speed limits; it can still alter wrist rotation and contact pivots. The browser retains cached v5 for comparison. Validate punch amplitude and timing as well as collision clearance; limited motion alone is not a quality measure.
+
+The opt-in **骨盆／躯干跟踪修正版 v10** uses `--body-anchor` (implies `--geometry`). It initializes the floating root from the first mapped source pelvis pose, rather than asking IK to rotate from the default facing direction, and tracks pelvis position (cost 20), pelvis orientation (50), and torso orientation (50). This addresses inverted/collapsed IK branches observed in clip 003. It retains the v7 hand budgets and collision checks. Caches are `NNN_geometry_v10`; v7 remains separately selectable. This is still kinematic retargeting, not balance control.
+
+### 因果响应与 ScaleBFM 物理跟踪浏览器
+
+在 `http://127.0.0.1:19093/?id=3&mode=reactive_stream` 选择“在线响应 → GMR → ScaleBFM 物理仿真”。默认选定片段前 120 个 30 Hz 帧、seed 42、排序后的第二位演员作为预录对手；前 4 帧为热启动。蓝色 G1 经 MuJoCo 500 Hz 物理与 ScaleBFM 50 Hz 控制，橙色为独立 GMR 运动学回放；没有双方碰撞，也没有将蓝色机器人实际状态反馈到上层生成器。
+
+`reactive_g1_pipeline.py` 启动 Ready-to-React 因果分段生成和部署仓库的 `reactive_stream_tracker.py`，自己使用 GMR body-anchor v10 连续求解。每块 4 帧完成跟踪后才确认下一块。对手预测输入截断至历史边界，decoder 辅助字段只能保持最后观测；ScaleBFM 超出已生成参考范围的预览保持末帧。参考缓冲增长不重置策略历史或物理状态；仿真仅在开始时初始化为首帧参考姿态，无外部支撑。
+
+计算等待时暂停虚拟时间，输出是因果流式计算后的回放，不保证墙钟实时。蓝色 50 Hz 轨迹重采样到浏览器 30 Hz，末端不足整帧时截断，因此 120 输入帧可能显示 119 帧。任务缓存保存在 `motion_data/duobox_web/motions/NNN_reactive_stream_v1/`，包括原始响应、机器人参考分块、物理轨迹、逐块计时和日志。失败缓存不自动覆盖。
+
+实际验证：003、004 各 120 人体帧 / 199 物理帧完成，未触发跌倒阈值；`scripts/validate_reactive_stream.py <job>` 校验历史边界、不可变前缀、对手原始位置一致性和物理输出。另比较 24 帧与 120 帧任务，共同生成前缀完全一致。此结果不代表实时性、泛化或交互闭环成功率。
+
+### 实时四视图与保存节点（2026-10-14）
+
+沿用上述浏览器服务，打开 `/live`：显示逐帧对手、在线生成自身、骨盆/双手目标及实际跟踪点、MuJoCo G1。`reactive_live.py` 管理本地仿真子进程、UDP 最新状态和 SSE 推流；`reactive_live.html` 共享一个 WebGL renderer，最多 25Hz 显示。启动需要模型加载预热，随后边生成边播放。实际控制和验证脚本位于相邻部署仓库 `tools/reactive_realtime.py` 与 `tools/validate_realtime_run.py`，具体实验记录见其 `README_zh.md`。
+
+参考播放默认落后输入时钟 300ms，这是本实现吸收生成抖动的缓冲，不是 Ready-to-React 固有延迟。当前目标及未来预览的首次使用时间另行记录，不应把 300ms 与生成耗时简单相加。页面当前只显示生成自身，没有显示原始录制自身；后者可以作为同参考时间的可选对照，但不能作为干预后响应正确性的真值，也不得输入生成器的未来条件。
+
+此保存节点包含此前尚未提交的 DuoBox 环境脚本、GMR v10 修正、原始/响应浏览器、无 IK 目标转换和实验工具。缓存、人体模型、动作、checkpoint 与输出不纳入提交。
