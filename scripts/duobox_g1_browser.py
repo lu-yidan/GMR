@@ -163,6 +163,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         try:
+            if path == '/hub':
+                return self.send((ROOT/'scripts/boxer_hub.html').read_bytes(),'text/html; charset=utf-8')
             if path == '/live':
                 return self.send((ROOT/'scripts/reactive_live.html').read_bytes(),'text/html; charset=utf-8')
             if path == '/live/events':
